@@ -164,8 +164,15 @@ func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
-	// Your Code Here (2A).
-	return nil
+	return &Raft{
+		id:               c.ID,
+		Term:             0,
+		electionTimeout:  c.ElectionTick,
+		heartbeatTimeout: c.HeartbeatTick,
+		RaftLog: &RaftLog{
+			storage: c.Storage,
+		},
+	}
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -182,23 +189,62 @@ func (r *Raft) sendHeartbeat(to uint64) {
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
-	// Your Code Here (2A).
+	r.electionTimeout += 1
+	r.heartbeatElapsed += 1
+	switch r.id {
+	case r.Lead:
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgHeartbeat,
+			Term:    r.Term,
+			From:    uint64(StateFollower),
+			To:      uint64(StateLeader),
+		})
+	case r.Vote:
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgHeartbeat,
+			Term:    r.Term,
+			From:    uint64(StateFollower),
+			To:      uint64(StateCandidate),
+		})
+	default:
+		r.State = StateFollower
+	}
 }
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
-	// Your Code Here (2A).
+	r.Term = term
+	r.Lead = lead
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		Term:    r.Term,
+		From:    uint64(r.State),
+		To:      uint64(StateFollower),
+	})
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
-	// Your Code Here (2A).
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		Term:    r.Term,
+		From:    uint64(StateFollower),
+		To:      uint64(StateCandidate),
+	})
+	r.Vote = r.id
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	r.Lead = r.id
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		Term:    r.Term,
+		From:    uint64(StateFollower),
+		To:      uint64(StateLeader),
+	})
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -207,8 +253,11 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
+		r.Term = m.Term
 	case StateCandidate:
+		r.Term = m.Term
 	case StateLeader:
+		r.Term = m.Term
 	}
 	return nil
 }
