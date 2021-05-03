@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -135,6 +136,10 @@ type Raft struct {
 	heartbeatTimeout int
 	// baseline of election interval
 	electionTimeout int
+
+	// randomized election timeout is a random number between electionTimeout and 2xelectionTimeout
+	randomizedElectionTimout int
+
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -165,13 +170,14 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	raft := Raft{
-		id:               c.ID,
-		Term:             0,
-		State:            StateFollower,
-		Prs:              make(map[uint64]*Progress, len(c.peers)),
-		votes:            make(map[uint64]bool, len(c.peers)),
-		electionTimeout:  c.ElectionTick,
-		heartbeatTimeout: c.HeartbeatTick,
+		id:                       c.ID,
+		Term:                     0,
+		State:                    StateFollower,
+		Prs:                      make(map[uint64]*Progress, len(c.peers)),
+		votes:                    make(map[uint64]bool, len(c.peers)),
+		electionTimeout:          c.ElectionTick,
+		randomizedElectionTimout: c.ElectionTick,
+		heartbeatTimeout:         c.HeartbeatTick,
 		RaftLog: &RaftLog{
 			storage: c.Storage,
 		},
@@ -191,7 +197,6 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
-	// Your Code Here (2A).
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeat,
 		From:    r.id,
@@ -215,6 +220,7 @@ func (r *Raft) tick() {
 	r.electionElapsed += 1
 	switch r.State {
 	case StateLeader:
+		r.heartbeatElapsed += 1
 		for i := range r.Prs {
 			if i != r.id {
 				r.sendHeartbeat(i)
@@ -222,11 +228,18 @@ func (r *Raft) tick() {
 		}
 		r.electionElapsed = 0
 	case StateFollower, StateCandidate:
-		if r.electionElapsed > r.electionTimeout {
-			r.becomeCandidate()
-			for i := range r.Prs {
-				if i != r.id {
-					r.sendVoteRequest(i)
+		if r.electionElapsed > r.randomizedElectionTimout {
+			r.randomizedElectionTimout = r.electionTimeout + rand.Intn(r.electionTimeout)
+			r.Step(pb.Message{
+				MsgType: pb.MessageType_MsgHup,
+				From:    r.id,
+				To:      r.id,
+			})
+			if r.State == StateCandidate {
+				for i := range r.Prs {
+					if i != r.id {
+						r.sendVoteRequest(i)
+					}
 				}
 			}
 			r.electionElapsed = 0
@@ -266,7 +279,7 @@ func (r *Raft) Step(m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		switch r.State {
 		case StateCandidate, StateLeader:
-			if m.Term > r.Term {
+			if m.Term >= r.Term {
 				r.Term = m.Term
 				r.State = StateFollower
 			}
@@ -274,16 +287,17 @@ func (r *Raft) Step(m pb.Message) error {
 			r.Term = m.Term
 		}
 	case pb.MessageType_MsgRequestVote:
-		for i := range r.Prs {
-			if i != r.id {
-				r.msgs = append(r.msgs, pb.Message{
-					MsgType: pb.MessageType_MsgRequestVoteResponse,
-					From:    i,
-					To:      r.id,
-					Term:    m.Term,
-				})
-			}
+		rject := false
+		if r.Vote != None {
+			rject = r.Vote != m.From
 		}
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgRequestVoteResponse,
+			From:    r.id,
+			To:      m.From,
+			Term:    m.Term,
+			Reject:  rject,
+		})
 	case pb.MessageType_MsgPropose:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgHup:
